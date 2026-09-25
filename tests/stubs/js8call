@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Stand-in for `js8call` used by the test suite.
+
+Behaves like the real thing in the two ways the launchers depend on: it is
+started as `js8call -r PROFILE`, and it opens the profile's TCP API port
+(TCPServerPort in ~/.config/JS8Call - PROFILE.ini), then idles until killed.
+Like the real program it dies on SIGHUP, so the tests can prove the launchers
+detach it from their terminal.
+"""
+import os
+import socket
+import sys
+
+args = sys.argv[1:]
+profile = args[args.index("-r") + 1] if "-r" in args else ""
+cfg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+ini = os.path.join(cfg, f"JS8Call - {profile}.ini")
+
+port = None
+try:
+    with open(ini) as f:
+        for line in f:
+            if line.startswith("TCPServerPort="):
+                port = int(line.split("=", 1)[1])
+except OSError as e:
+    sys.exit(f"stub js8call: can't read {ini}: {e}")
+if port is None:
+    sys.exit("stub js8call: no TCPServerPort in the profile")
+
+srv = socket.socket()
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", port))
+srv.listen(5)
+while True:
+    conn, _ = srv.accept()
+    conn.close()

@@ -1,0 +1,27 @@
+[MultiSettings]
+CurrentName=Default
+
+[Configuration]
+AcceptTCPRequests=true
+AcceptUDPRequests=false
+AudioInputChannel=Mono
+AudioOutputChannel=Mono
+CATNetworkPort=
+CATSerialPort=
+MyCall=@CALLSIGN@
+MyGrid=@GRID@
+PSKReporter=false
+SpotToAPRS=false
+PTTport=
+Polling=1
+Rig=None
+RxBandwidth=2500
+SaveDir=@DATA_HOME@/JS8Call - @PROFILE@/save
+SoundInName=@SINK@.monitor
+SoundOutName=@TXVOID@
+TCPEnabled=true
+TCPMaxConnections=1
+TCPServer=127.0.0.1
+TCPServerPort=@TCP_PORT@
+UDPServer=127.0.0.1
+UDPServerPort=@UDP_PORT@

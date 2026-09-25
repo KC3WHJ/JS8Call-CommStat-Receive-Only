@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Stop the receive-only JS8Call + CommStat station and remove its virtual
+# audio devices. Only touches things belonging to this install (matched by its
+# own JS8Call profile name and CommStat folder), never a normal JS8Call or
+# CommStat you may run separately.
+set -u
+
+_self="$(readlink -f "${BASH_SOURCE[0]}")"
+_here="$(dirname "$_self")"
+APP=""
+for c in "${WEBSDR_JS8_APP_DIR:-}" "$_here/.." "${XDG_DATA_HOME:-$HOME/.local/share}/websdr-js8/app"; do
+    [ -n "$c" ] && [ -f "$c/lib/common.sh" ] && { APP="$(cd "$c" && pwd)"; break; }
+done
+[ -n "$APP" ] || { echo "ERROR: can't find JS8Call-CommStat-Receive-Only's lib/ - has it been installed?" >&2; exit 1; }
+# shellcheck source=../lib/common.sh
+. "$APP/lib/common.sh"
+load_config
+
+# Wait up to N seconds for a process pattern to disappear.
+wait_gone() {  # pattern seconds
+    local i
+    for i in $(seq 1 "$2"); do pgrep -f "$1" >/dev/null 2>&1 || return 0; sleep 1; done
+    ! pgrep -f "$1" >/dev/null 2>&1
+}
+
+step "Stopping CommStat"
+cs_pat="python3 $COMMSTAT_DIR/little_gucci.py"
+if pgrep -f "$cs_pat" >/dev/null 2>&1; then
+    pkill -f "$cs_pat" 2>/dev/null
+    if wait_gone "$cs_pat" 10; then info "Stopped."; else pkill -9 -f "$cs_pat" 2>/dev/null; info "Stopped (forced)."; fi
+else
+    info "Not running."
+fi
+
+step "Stopping JS8Call (profile: $PROFILE)"
+js_pat="(^|/)js8call -r $PROFILE( |\$)"
+if pgrep -f "$js_pat" >/dev/null 2>&1; then
+    pkill -f "$js_pat" 2>/dev/null
+    if wait_gone "$js_pat" 10; then info "Stopped."; else pkill -9 -f "$js_pat" 2>/dev/null; info "Stopped (forced)."; fi
+else
+    info "Not running."
+fi
+
+step "Removing virtual audio devices"
+if have pactl && pactl info >/dev/null 2>&1; then
+    for s in "$TXVOID" "$SINK"; do
+        if sink_module_loaded "$s"; then remove_null_sink "$s"; info "Removed $s."; else info "$s wasn't loaded."; fi
+    done
+else
+    info "No audio server reachable - nothing to remove."
+fi
+
+echo
+info "Done. Any browser tab that was routed into the WebSDR device now plays through your speakers again."

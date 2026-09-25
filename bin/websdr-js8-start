@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# Start the receive-only JS8Call + CommStat station.
+#
+#   websdr-js8-start [--no-route] [--no-commstat]
+#
+# What it does, in order:
+#   1. Refuses to run unless the JS8Call profile is genuinely receive-only
+#      (no rig control, no PTT, spotting off) - see "receive-only guard" below.
+#   2. Creates two virtual audio devices: one your WebSDR's audio is played
+#      into (JS8Call listens to it), and one that JS8Call's *transmit* audio is
+#      sent to and thrown away.
+#   3. Starts JS8Call (its own profile, so it never touches a normal JS8Call
+#      setup), waits for its API port, then starts CommStat.
+#   4. Helps you route the browser tab that is playing the WebSDR into (2).
+#
+# JS8Call and CommStat are fully detached from the terminal window that ran
+# this: closing that window does NOT stop them. Use websdr-js8-stop.
+set -u
+
+_self="$(readlink -f "${BASH_SOURCE[0]}")"
+_here="$(dirname "$_self")"
+APP=""
+for c in "${WEBSDR_JS8_APP_DIR:-}" "$_here/.." "${XDG_DATA_HOME:-$HOME/.local/share}/websdr-js8/app"; do
+    [ -n "$c" ] && [ -f "$c/lib/common.sh" ] && { APP="$(cd "$c" && pwd)"; break; }
+done
+[ -n "$APP" ] || { echo "ERROR: can't find JS8Call-CommStat-Receive-Only's lib/ - has it been installed? (run install.sh)" >&2; exit 1; }
+# shellcheck source=../lib/common.sh
+. "$APP/lib/common.sh"
+load_config
+
+ROUTE=1; DO_COMMSTAT=1
+for a in "$@"; do
+    case "$a" in
+        --no-route)    ROUTE=0 ;;
+        --no-commstat) DO_COMMSTAT=0 ;;
+        -h|--help)     sed -n '2,19p' "$_self" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) die "unknown option: $a" ;;
+    esac
+done
+
+have js8call || die "js8call isn't installed. Run install.sh first."
+have pactl   || die "pactl isn't installed (sudo apt install pulseaudio-utils)."
+pactl info >/dev/null 2>&1 || die "can't reach the audio server (PulseAudio/PipeWire). Run this inside your desktop session."
+[ -f "$JS8_INI" ] || die "JS8Call profile not found: $JS8_INI - run install.sh first."
+
+# ------------------------------------------------------ receive-only guard
+# A receive-only station must not be able to key a radio. The profile is
+# written that way by the installer; this re-checks it every start in case it
+# was changed later inside JS8Call (Settings > Radio), and refuses to start
+# rather than run in a state that could transmit.
+guard_fail() { die "receive-only guard: $1
+  This station is meant to be receive-only, so it will not start like this.
+  Fix it in $JS8_INI (or re-run install.sh on a fresh profile)."; }
+[ "$(ini_get "$JS8_INI" Rig)" = "None" ]  || guard_fail "the JS8Call profile has Rig='$(ini_get "$JS8_INI" Rig)' (must be None)."
+[ -z "$(ini_get "$JS8_INI" CATSerialPort)" ]  || guard_fail "a CAT serial port is configured."
+[ -z "$(ini_get "$JS8_INI" CATNetworkPort)" ] || guard_fail "a CAT network port (rigctld) is configured."
+[ -z "$(ini_get "$JS8_INI" PTTport)" ]        || guard_fail "a PTT port is configured."
+# Spotting must be OFF (and explicitly so): this station hears a REMOTE receiver, so anything it
+# reported to PSKReporter or APRS-IS would be attributed to YOUR callsign and grid.
+[ "$(ini_get "$JS8_INI" PSKReporter)" = "false" ] || guard_fail "PSKReporter spotting isn't switched off (PSKReporter='$(ini_get "$JS8_INI" PSKReporter)'). Stations heard via a remote receiver must not be reported under your callsign and grid."
+[ "$(ini_get "$JS8_INI" SpotToAPRS)" = "false" ]  || guard_fail "APRS spotting isn't switched off (SpotToAPRS='$(ini_get "$JS8_INI" SpotToAPRS)'). Stations heard via a remote receiver must not be reported under your callsign and grid."
+[ "$(ini_get "$JS8_INI" SoundOutName)" = "$TXVOID" ] || warn "JS8Call's audio OUTPUT isn't the discard device ($TXVOID); a transmit attempt could make sound on your speakers (it still cannot key a radio)."
+
+# ------------------------------------------------------- virtual audio devices
+step "Virtual audio devices"
+ensure_null_sink "$SINK"   "WebSDR_Receive"     || die "couldn't create the '$SINK' audio device."
+ensure_null_sink "$TXVOID" "WebSDR_TX_Discard"  || die "couldn't create the '$TXVOID' audio device."
+info "Ready: $SINK (WebSDR audio in), $TXVOID (transmit audio discarded)."
+
+# ---------------------------------------------------------------- JS8Call
+step "JS8Call (profile: $PROFILE)"
+js8_running() { pgrep -f "(^|/)js8call -r $PROFILE( |\$)" >/dev/null 2>&1; }
+if js8_running; then
+    info "Already running."
+else
+    mkdir -p "$DATA_DIR"
+    # setsid -f: fork, and in the child immediately start a new session (so it has no
+    # controlling terminal to hang up), then nohup for good measure. A bare `&` - even with
+    # disown - still gets a hang-up signal when the terminal window closes.
+    setsid -f nohup js8call -r "$PROFILE" >"$DATA_DIR/js8call.log" 2>&1 </dev/null
+    info "Started. Waiting for its API port ($TCP_PORT)..."
+    for _ in $(seq 1 40); do port_in_use "$TCP_PORT" && break; sleep 1; done
+    if port_in_use "$TCP_PORT"; then info "JS8Call is up."
+    else warn "JS8Call's API port $TCP_PORT didn't open in 40 s - see $DATA_DIR/js8call.log"; fi
+fi
+
+# --------------------------------------------------------------- CommStat
+if [ "$DO_COMMSTAT" = 1 ]; then
+    step "CommStat"
+    if [ ! -f "$COMMSTAT_DIR/commstat.py" ]; then
+        warn "CommStat not found at $COMMSTAT_DIR - skipping (run install.sh, or use --no-commstat)."
+    elif pgrep -f "python3 $COMMSTAT_DIR/little_gucci.py" >/dev/null 2>&1; then
+        info "Already running."
+    else
+        # CommStat connects to JS8Call once, at startup - which is why JS8Call's port must
+        # already be open (waited for above).
+        # Same detach as JS8Call (setsid -f: new session right at the fork), so closing this
+        # terminal - even a split second after launching - can't reach it. It matters for
+        # CommStat in particular: nohup alone protects CommStat but NOT its Qt WebEngine
+        # helper processes, which would leave a running CommStat with a blank map. CommStat
+        # needs to run from its own folder (its database path is relative).
+        setsid -f bash -c 'cd "$1" && exec nohup python3 commstat.py' _ "$COMMSTAT_DIR" \
+            >"$DATA_DIR/commstat.log" 2>&1 </dev/null
+        info "Started (log: $DATA_DIR/commstat.log)."
+    fi
+fi
+
+# ----------------------------------------------------------------- routing
+[ "$ROUTE" = 1 ] || { info; info "Skipping audio routing (--no-route). Stop everything with: websdr-js8-stop"; exit 0; }
+
+step "Route your WebSDR's audio into JS8Call"
+
+routed_already() {
+    pactl -f json list sink-inputs 2>/dev/null | python3 -c '
+import json, subprocess, sys
+name = sys.argv[1]
+sinks = {s["name"]: s["index"] for s in json.loads(subprocess.run(["pactl", "-f", "json", "list", "sinks"], capture_output=True, text=True).stdout)}
+want = sinks.get(name)
+sys.exit(0 if want is not None and any(i.get("sink") == want for i in json.load(sys.stdin)) else 1)' "$SINK"
+}
+
+if routed_already; then
+    info "A stream is already routed into $SINK - nothing more to do."
+    info; info "When you're finished: websdr-js8-stop"; exit 0
+fi
+
+cat <<EOF
+1. In your browser, open a web SDR or KiwiSDR and start its audio playing.
+   Tune it to a JS8 frequency in USB mode (for example 7.078 MHz).
+2. Come back here and press Enter.
+EOF
+read -r -p "" _
+
+list_streams() {
+    pactl -f json list sink-inputs 2>/dev/null | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+for i in data:
+    p = i.get("properties", {})
+    label = p.get("application.name", "unknown app")
+    media = p.get("media.name", "")
+    if media:
+        label += " - " + media
+    print("%s\t%s" % (i["index"], label.replace("\t", " ")))'
+}
+
+streams="$(list_streams)"
+if [ -z "$streams" ]; then
+    echo "No audio is playing yet. Start the WebSDR's audio, then run websdr-js8-start again"
+    echo "(it's safe to re-run; everything already started is reused)."
+    exit 1
+fi
+
+choice=""
+if have dialog; then
+    args=()
+    while IFS=$'\t' read -r idx label; do args+=("$idx" "$label"); done <<<"$streams"
+    choice="$(dialog --clear --menu "Which audio stream is the WebSDR?" 15 76 8 "${args[@]}" 3>&1 1>&2 2>&3)" || true
+    clear
+else
+    echo "Which audio stream is the WebSDR?"
+    ids=(); labels=()
+    while IFS=$'\t' read -r idx label; do ids+=("$idx"); labels+=("$label"); done <<<"$streams"
+    select lbl in "${labels[@]}"; do
+        [ -n "${lbl:-}" ] && { choice="${ids[$((REPLY-1))]}"; break; }
+    done
+fi
+[ -n "$choice" ] || { echo "Nothing selected - nothing routed. Run websdr-js8-start again to retry."; exit 1; }
+
+pactl move-sink-input "$choice" "$SINK" || die "couldn't move the stream into $SINK."
+info "Routed stream $choice into $SINK. JS8Call should start decoding within a cycle or two."
+info; info "When you're finished: websdr-js8-stop"
