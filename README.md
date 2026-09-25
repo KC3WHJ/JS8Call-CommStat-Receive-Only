@@ -141,6 +141,14 @@ Not covered by the test suite: the `apt install` step and CommStat's own
 `linuxinstall.sh` on a clean machine (they need sudo and a fresh system). If you
 try it on a fresh VM or a distribution not listed above, please report what you find.
 
+## Part of a bigger station
+
+This is the receive-only piece of a full ham radio + SDR station build for Linux Mint:
+**[mint-sauce-for-ham](https://github.com/KC3WHJ/mint-sauce-for-ham)** - ADS-B tracking,
+multi-radio selection, Winlink, VARA, WSJT-X, JS8Call, Fldigi/Flmsg and more. If you have a
+radio and want the whole station, start there; this repository is for anyone who only wants
+the receive-only JS8Call + CommStat listening station.
+
 ## Credits and licenses
 
 This project only installs and configures other people's software; it does not
