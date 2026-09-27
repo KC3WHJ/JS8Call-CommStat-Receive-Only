@@ -2,7 +2,7 @@
 # Shared helpers for install.sh, preflight.sh, uninstall.sh and the launchers.
 # Source this file; it does nothing on its own.
 
-WEBSDR_JS8_VERSION="0.1.0"
+WEBSDR_JS8_VERSION="0.1.1"
 
 if [ -t 1 ]; then
     C_RED=$'\e[31m'; C_GRN=$'\e[32m'; C_YEL=$'\e[33m'; C_DIM=$'\e[2m'; C_BLD=$'\e[1m'; C_OFF=$'\e[0m'

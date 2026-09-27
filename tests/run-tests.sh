@@ -46,7 +46,10 @@ cs_pid()      { pgrep -f "python3 $CS/little_gucci.py" | head -1; }
 
 cleanup() {
     local p
-    for p in $(pgrep -f "/js8call -r RxTest( |\$)") $(pgrep -f "python3 $CS/little_gucci.py") ; do kill "$p" 2>/dev/null; done
+    for p in $(pgrep -f "/js8call -r RxTest( |\$)") $(pgrep -f "python3 $CS/little_gucci.py") \
+             $(pgrep -f "websdr-js8-watch-sink rxtest_sink") $(pgrep -f "paplay.*$T/tone.wav"); do
+        kill "$p" 2>/dev/null
+    done
     for s in rxtest_sink rxtest_txvoid; do
         for id in $(pactl list short modules 2>/dev/null | awk -v s="sink_name=$s" '$0 ~ s {print $1}'); do pactl unload-module "$id" 2>/dev/null; done
     done
@@ -56,7 +59,7 @@ trap cleanup EXIT
 
 # ------------------------------------------------------------------- lint
 section "Syntax"
-for f in install.sh uninstall.sh preflight.sh lib/common.sh bin/websdr-js8-start bin/websdr-js8-stop tests/run-tests.sh; do
+for f in install.sh uninstall.sh preflight.sh lib/common.sh bin/websdr-js8-start bin/websdr-js8-stop bin/websdr-js8-watch-sink tests/run-tests.sh; do
     t "bash -n $f" bash -n "$ROOT/$f"
 done
 # (parse only - py_compile would write .pyc files into the repo)
@@ -197,6 +200,54 @@ print(c.execute('select callsign,gridsquare,state from controls').fetchone(), c.
     { [ -z "$(js8_pid)" ] && [ -z "$(cs_pid)" ] && [ "$(modules_for rxtest_sink)" = 0 ] && [ "$(modules_for rxtest_txvoid)" = 0 ]; } \
         && ok "stop ends both apps and removes both virtual devices" || bad "stop left something behind" "js8=$(js8_pid) cs=$(cs_pid) sinks=$(modules_for rxtest_sink)/$(modules_for rxtest_txvoid)"
     "$STOP" >/dev/null 2>&1 && ok "stop is harmless when nothing is running" || bad "stop failed when idle"
+
+    # -------------------------------------- audio routing + the stray-stream watcher
+    section "Audio routing and the stray-audio watcher"
+    # `dialog` stand-in: auto-picks $STUB_DIALOG_CHOICE instead of showing a menu (same fd-3
+    # trick the real dialog uses: `dialog ... 3>&1 1>&2 2>&3` in websdr-js8-start captures
+    # whatever we write to fd 3 as the chosen stream id).
+    cat > "$T/fakebin/dialog" <<'DIALOG_STUB_END'
+#!/bin/sh
+echo "$STUB_DIALOG_CHOICE" >&3
+DIALOG_STUB_END
+    chmod +x "$T/fakebin/dialog"
+    python3 -c "
+import wave, struct, math
+w = wave.open('$T/tone.wav', 'w'); w.setnchannels(1); w.setsampwidth(2); w.setframerate(8000)
+for i in range(8000 * 3):
+    w.writeframesraw(struct.pack('<h', int(3000 * math.sin(2 * math.pi * 440 * i / 8000))))
+w.close()"
+
+    paplay "$T/tone.wav" >/dev/null 2>&1 &
+    sleep 0.5
+    CHOICE_ID="$(pactl list short sink-inputs | awk '{print $1; exit}')"
+    out="$(PATH="$T/fakebin:$PATH" STUB_DIALOG_CHOICE="$CHOICE_ID" "$START" 2>&1)"; rc=$?
+    [ "$rc" = 0 ] && ok "start (routed) exits 0" || bad "routed start failed (exit $rc)" "$out"
+    { [ -n "$CHOICE_ID" ] && [ "$(pactl list short sink-inputs | awk -v i="$CHOICE_ID" '$1==i{print $2}')" = "$(pactl list short sinks | awk '$2=="rxtest_sink"{print $1}')" ]; } \
+        && ok "chosen stream landed on rxtest_sink" || bad "chosen stream isn't on rxtest_sink"
+    sleep 0.5
+    [ -n "$(pgrep -f "websdr-js8-watch-sink rxtest_sink")" ] && ok "the audio-routing watcher is running" || bad "watcher didn't start"
+
+    # A second, unrelated stream lands on rxtest_sink BY ITSELF (the PipeWire per-app-default
+    # quirk this watcher exists to undo) - it must get moved back off rxtest_sink on its own.
+    paplay --device=rxtest_sink "$T/tone.wav" >/dev/null 2>&1 &
+    STRAY_PID=$!
+    ok_stray=0
+    for _ in $(seq 1 20); do
+        # the stray stream should get moved OFF rxtest_sink, leaving only the original choice there
+        on_sink="$(pactl list short sink-inputs | awk -v s="$(pactl list short sinks | awk '$2=="rxtest_sink"{print $1}')" '$2==s{print $1}')"
+        extra="$(echo "$on_sink" | grep -vx "$CHOICE_ID" || true)"
+        [ -z "$extra" ] && { ok_stray=1; break; }
+        sleep 0.3
+    done
+    kill "$STRAY_PID" 2>/dev/null
+    [ "$ok_stray" = 1 ] && ok "a stray second stream on rxtest_sink is moved back automatically" \
+        || bad "stray stream was not moved off rxtest_sink" "still on sink: $extra"
+    { [ "$(pactl list short sink-inputs | awk -v i="$CHOICE_ID" '$1==i{print $2}')" = "$(pactl list short sinks | awk '$2=="rxtest_sink"{print $1}')" ]; } \
+        && ok "the originally-chosen stream was left alone" || bad "the chosen stream got moved too"
+
+    "$STOP" >/dev/null 2>&1
+    [ -z "$(pgrep -f "websdr-js8-watch-sink rxtest_sink")" ] && ok "stop also stops the audio-routing watcher" || bad "watcher survived stop"
 
     # Closing the terminal window that ran the launcher must NOT kill the apps.
     python3 - "$START" <<'PTY_HARNESS_END'

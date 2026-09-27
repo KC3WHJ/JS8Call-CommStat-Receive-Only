@@ -96,8 +96,8 @@ Run `./preflight.sh --help` for its options.
 | CommStat | `~/.local/share/websdr-js8/CommStat` (cloned from GitHub) |
 | JS8Call profile | `~/.config/JS8Call - WebSDR.ini` |
 | Settings | `~/.config/websdr-js8/config` |
-| Launchers | `~/.local/bin/websdr-js8-start`, `websdr-js8-stop`, and menu/Desktop shortcuts |
-| Logs | `~/.local/share/websdr-js8/js8call.log`, `commstat.log` |
+| Launchers | `~/.local/bin/websdr-js8-start`, `websdr-js8-stop`, `websdr-js8-watch-sink`, and menu/Desktop shortcuts |
+| Logs | `~/.local/share/websdr-js8/js8call.log`, `commstat.log`, `routing-watcher.log` |
 
 Re-running the installer is safe: it keeps an existing JS8Call profile, an
 existing CommStat database and any connector already present.
@@ -121,6 +121,11 @@ Installed packages are left alone; remove them with `apt` if you want.
   inside its folder; the installer already handles this.
 - **Someone else's receiver has its own rules.** Public KiwiSDRs often limit
   session length and users; follow the operator's terms.
+- **A second, unrelated audio stream (e.g. another browser tab) won't go silent.** PipeWire/PulseAudio
+  remembers which sink an app's audio goes to *per application*, not per tab - so without this, once
+  the WebSDR's stream is routed in, any *other* new stream from the same browser could get silently
+  swept in too. `websdr-js8-watch-sink` runs for the length of the session and moves anything else
+  that lands on the WebSDR sink back to your normal output automatically.
 - **JS8Call's title bar always says "de KN4CRD".** That is the JS8Call author's callsign,
   built into the title of every JS8Call window (its format string is literally
   `%1 de KN4CRD (v%2)`). It is not your callsign and not a setting; yours is shown in the
@@ -128,9 +133,10 @@ Installed packages are left alone; remove them with `apt` if you want.
 
 ## Testing
 
-`tests/run-tests.sh` runs 74 checks with no sudo, GUI or internet: prerequisite
-failures, the installer, idempotency, launcher start/stop, terminal-close
-survival, duplicate audio devices, the receive-only guard, and uninstall. It uses
+`tests/run-tests.sh` runs 81 checks with no sudo, GUI or internet: prerequisite
+failures, the installer, idempotency, launcher start/stop, audio routing and the
+stray-stream watcher, terminal-close survival, duplicate audio devices, the
+receive-only guard, and uninstall. It uses
 stand-ins for the two GUIs (but CommStat's real database template and connector
 code) and its own profile name, ports and audio devices, so it can run beside a
 live install. A separate end-to-end check ran the **real JS8Call binary** with the

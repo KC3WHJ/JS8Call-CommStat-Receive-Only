@@ -170,8 +170,8 @@ step "Installing launchers"
 mkdir -p "$BIN_DIR" "$DATA_DIR/app/lib" "$DATA_DIR/app/share"
 cp "$HERE/lib/common.sh" "$DATA_DIR/app/lib/"
 cp "$HERE/share/JS8Call-profile.ini.template" "$HERE/share/seed_commstat.py" "$DATA_DIR/app/share/"
-install -m 0755 "$HERE/bin/websdr-js8-start" "$HERE/bin/websdr-js8-stop" "$BIN_DIR/"
-info "Installed websdr-js8-start and websdr-js8-stop in $BIN_DIR"
+install -m 0755 "$HERE/bin/websdr-js8-start" "$HERE/bin/websdr-js8-stop" "$HERE/bin/websdr-js8-watch-sink" "$BIN_DIR/"
+info "Installed websdr-js8-start, websdr-js8-stop and websdr-js8-watch-sink in $BIN_DIR"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "$BIN_DIR isn't on your PATH yet - log out and back in, or run: export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
 
 APPS_DIR="$DATA_HOME/applications"
@@ -213,7 +213,8 @@ if python3 -c 'import PyQt5.QtWebEngineWidgets, PyQt5.QtMultimedia' 2>/dev/null;
 else warn "CommStat's Qt WebEngine Python modules aren't importable - re-run without --skip-commstat-deps."; bad=1; fi
 [ -f "$JS8_INI" ]                    && info "  ok  JS8Call profile"          || { warn "JS8Call profile missing"; bad=1; }
 [ -f "$COMMSTAT_DIR/traffic.db3" ]   && info "  ok  CommStat database"        || { warn "CommStat database missing"; bad=1; }
-[ -x "$BIN_DIR/websdr-js8-start" ]   && info "  ok  launchers"                || { warn "launchers missing"; bad=1; }
+[ -x "$BIN_DIR/websdr-js8-start" ] && [ -x "$BIN_DIR/websdr-js8-watch-sink" ] \
+                                     && info "  ok  launchers"                || { warn "launchers missing"; bad=1; }
 
 echo
 if [ "$bad" = 0 ]; then

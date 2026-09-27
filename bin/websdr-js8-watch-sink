@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Runs alongside an active station, undoing a PipeWire/PulseAudio quirk: once one stream is moved
+# into the WebSDR sink, that choice is remembered PER APPLICATION (not per tab/stream) - so a
+# SECOND, unrelated stream from the same app (another browser tab playing something else while the
+# WebSDR page is open) gets silently swept into the sink too and goes silent, with no error shown.
+#
+# Started (detached) by websdr-js8-start right after it routes the stream you chose; stopped by
+# websdr-js8-stop. Only that one stream ID is left alone - anything else that lands on the sink is
+# moved back to the sink that was your default output at the time.
+#
+# Usage: websdr-js8-watch-sink SINK_NAME KEEP_STREAM_ID RESTORE_TO_SINK LOG_FILE
+set -u
+SINK_NAME="$1" KEEP_ID="$2" RESTORE_SINK="$3" LOG="$4"
+
+sink_index() { pactl list short sinks | awk -v n="$SINK_NAME" '$2 == n {print $1; exit}'; }
+
+pactl subscribe 2>/dev/null | while read -r line; do
+    case "$line" in
+        *"'new' on sink-input"*) ;;
+        *) continue ;;
+    esac
+    id="${line##*\#}"
+    [ -n "$id" ] || continue
+    [ "$id" = "$KEEP_ID" ] && continue
+    # Give PipeWire a moment to finish assigning the new stream's initial sink before checking it.
+    sleep 0.3
+    idx="$(sink_index)"
+    cur="$(pactl list short sink-inputs | awk -v i="$id" '$1 == i {print $2}')"
+    [ -n "$idx" ] && [ "$cur" = "$idx" ] || continue
+    pactl move-sink-input "$id" "$RESTORE_SINK" 2>/dev/null \
+        && echo "$(date '+%F %T') Stream #$id landed on $SINK_NAME on its own (PipeWire's per-app default) - moved back to $RESTORE_SINK." >> "$LOG"
+done

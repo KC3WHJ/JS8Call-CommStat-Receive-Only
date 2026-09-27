@@ -169,4 +169,16 @@ fi
 
 pactl move-sink-input "$choice" "$SINK" || die "couldn't move the stream into $SINK."
 info "Routed stream $choice into $SINK. JS8Call should start decoding within a cycle or two."
+
+# PipeWire/PulseAudio quirk: once one stream from an app is moved into $SINK, it remembers that
+# choice PER APPLICATION, not per tab - so a second, unrelated stream from the same app (another
+# browser tab) can get silently swept in too and go silent. This watcher undoes that for the rest
+# of the session; websdr-js8-stop stops it.
+if have pactl && [ -x "$_here/websdr-js8-watch-sink" ]; then
+    default_sink="$(pactl get-default-sink)"
+    setsid -f "$_here/websdr-js8-watch-sink" "$SINK" "$choice" "$default_sink" \
+        "$DATA_DIR/routing-watcher.log" >/dev/null 2>&1 </dev/null
+    info "Watching for any OTHER app audio that lands on $SINK by mistake (log: $DATA_DIR/routing-watcher.log)."
+fi
+
 info; info "When you're finished: websdr-js8-stop"

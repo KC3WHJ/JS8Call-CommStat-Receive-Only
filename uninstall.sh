@@ -40,10 +40,10 @@ if [ -x "$BIN_DIR/websdr-js8-stop" ]; then "$BIN_DIR/websdr-js8-stop" || true
 else info "Launchers not found - skipping."; fi
 
 step "Removing launchers, shortcuts and settings"
-rm -fv "$BIN_DIR/websdr-js8-start" "$BIN_DIR/websdr-js8-stop" \
+rm -fv "$BIN_DIR/websdr-js8-start" "$BIN_DIR/websdr-js8-stop" "$BIN_DIR/websdr-js8-watch-sink" \
        "$DATA_HOME/applications/websdr-js8-start.desktop" "$DATA_HOME/applications/websdr-js8-stop.desktop" \
        "$DESK/websdr-js8-start.desktop" "$DESK/websdr-js8-stop.desktop"
-rm -rf "$DATA_DIR/app" "$DATA_DIR/js8call.log" "$DATA_DIR/commstat.log"
+rm -rf "$DATA_DIR/app" "$DATA_DIR/js8call.log" "$DATA_DIR/commstat.log" "$DATA_DIR/routing-watcher.log"
 rm -rf "$CONFIG_DIR"
 info "Removed the app files and $CONFIG_DIR"
 

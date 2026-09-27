@@ -41,6 +41,15 @@ else
     info "Not running."
 fi
 
+step "Stopping the audio-routing watcher"
+watch_pat="websdr-js8-watch-sink $SINK"
+if pgrep -f "$watch_pat" >/dev/null 2>&1; then
+    pkill -f "$watch_pat" 2>/dev/null
+    info "Stopped."
+else
+    info "Not running."
+fi
+
 step "Removing virtual audio devices"
 if have pactl && pactl info >/dev/null 2>&1; then
     for s in "$TXVOID" "$SINK"; do
