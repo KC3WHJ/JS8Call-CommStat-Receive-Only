@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Stand-in for `fldigi` used by the test suite.
+
+Behaves like the real thing in the ways the launchers depend on: it is started
+with --config-dir DIR/ and --xmlrpc-server-port PORT, serves XML-RPC on that
+port, starts the FLAMP and Prog 1 (FLMSG) autostart programs named in
+DIR/fldigi_def.xml, and exits when told to over XML-RPC (fldigi.terminate).
+It records the PulseAudio devices it was given (PULSE_SOURCE/PULSE_SINK) in
+DIR/stub-audio.txt. Like the real program it dies on SIGHUP.
+"""
+import os
+import re
+import subprocess
+import sys
+import threading
+from xmlrpc.server import SimpleXMLRPCServer
+
+args = sys.argv[1:]
+def opt(name):
+    return args[args.index(name) + 1] if name in args else None
+
+cfg = opt("--config-dir") or sys.exit("stub fldigi: no --config-dir")
+port = int(opt("--xmlrpc-server-port") or 7362)
+xml = open(os.path.join(cfg, "fldigi_def.xml")).read()
+def setting(key):
+    m = re.search(r"^<%s>(.*)</%s>$" % (key, key), xml, re.M)
+    return m.group(1) if m else ""
+
+with open(os.path.join(cfg, "stub-audio.txt"), "w") as f:
+    f.write("%s %s\n" % (os.environ.get("PULSE_SOURCE", ""), os.environ.get("PULSE_SINK", "")))
+
+for path_key, enable_key in (("AUTO_FLAMP_PATHNAME", "FLAMP_AUTO_ENABLE"), ("AUTO_PROG1_PATHNAME", "PROG1_AUTO_ENABLE")):
+    if setting(enable_key) == "1" and setting(path_key):
+        subprocess.Popen(setting(path_key), shell=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+srv = SimpleXMLRPCServer(("127.0.0.1", port), logRequests=False, allow_none=True)
+def terminate(_flags):
+    threading.Timer(0.2, lambda: os._exit(0)).start()
+    return None
+srv.register_function(terminate, "fldigi.terminate")
+srv.serve_forever()

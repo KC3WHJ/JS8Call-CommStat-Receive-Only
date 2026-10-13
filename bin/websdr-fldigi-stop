@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Stop the receive-only FLDIGI + FLMSG + FLAMP station and remove its virtual audio
+# devices. Only touches this station's own copies (matched by their settings folders),
+# never a normal FLDIGI, FLMSG or FLAMP you run with a radio.
+set -u
+
+_self="$(readlink -f "${BASH_SOURCE[0]}")"
+_here="$(dirname "$_self")"
+APP=""
+for c in "${WEBSDR_JS8_APP_DIR:-}" "$_here/.." "${XDG_DATA_HOME:-$HOME/.local/share}/websdr-js8/app"; do
+    [ -n "$c" ] && [ -f "$c/lib/common.sh" ] && { APP="$(cd "$c" && pwd)"; break; }
+done
+[ -n "$APP" ] || { echo "ERROR: can't find WebSDR-Digital-Receive-Only's lib/ - has it been installed?" >&2; exit 1; }
+# shellcheck source=../lib/common.sh
+. "$APP/lib/common.sh"
+load_config
+
+wait_gone() {  # pattern seconds
+    local i
+    for i in $(seq 1 "$2"); do pgrep -f "$1" >/dev/null 2>&1 || return 0; sleep 1; done
+    ! pgrep -f "$1" >/dev/null 2>&1
+}
+stop_proc() {  # label pattern
+    step "Stopping $1"
+    if pgrep -f "$2" >/dev/null 2>&1; then
+        pkill -TERM -f "$2" 2>/dev/null
+        if wait_gone "$2" 10; then info "Stopped."; else pkill -9 -f "$2" 2>/dev/null; info "Stopped (forced)."; fi
+    else
+        info "Not running."
+    fi
+}
+
+# FLAMP and FLMSG first: FLAMP can hang on close once its FLDIGI is gone.
+stop_proc "FLAMP" "flamp --config-dir $NBEMS_DIR/"
+stop_proc "FLMSG" "flmsg --flmsg-dir $NBEMS_DIR/"
+
+step "Stopping FLDIGI"
+fl_pat="fldigi --config-dir $FLDIGI_DIR/"
+if pgrep -f "$fl_pat" >/dev/null 2>&1; then
+    # Ask FLDIGI to close itself so it saves its settings (a signal makes it exit without
+    # saving). 7 = save options, log and macros.
+    python3 -c 'import sys, xmlrpc.client as x; x.ServerProxy("http://127.0.0.1:%s" % sys.argv[1]).fldigi.terminate(7)' \
+        "$FL_XMLRPC_PORT" >/dev/null 2>&1 || true
+    if wait_gone "$fl_pat" 10; then
+        info "Stopped."
+    else
+        pkill -TERM -f "$fl_pat" 2>/dev/null
+        if wait_gone "$fl_pat" 5; then info "Stopped (without saving its settings)."
+        else pkill -9 -f "$fl_pat" 2>/dev/null; info "Stopped (forced)."; fi
+    fi
+else
+    info "Not running."
+fi
+
+step "Stopping the audio-routing watcher"
+watch_pat="websdr-js8-watch-sink $FL_SINK "
+if pgrep -f "$watch_pat" >/dev/null 2>&1; then pkill -f "$watch_pat" 2>/dev/null; info "Stopped."
+else info "Not running."; fi
+
+step "Removing virtual audio devices"
+if have pactl && pactl info >/dev/null 2>&1; then
+    for s in "$FL_TXVOID" "$FL_SINK"; do
+        if sink_module_loaded "$s"; then remove_null_sink "$s"; info "Removed $s."; else info "$s wasn't loaded."; fi
+    done
+else
+    info "No audio server reachable - nothing to remove."
+fi
+
+echo
+info "Done. Any browser tab that was routed into FLDIGI now plays through your speakers again."

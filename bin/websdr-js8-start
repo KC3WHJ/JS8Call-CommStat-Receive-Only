@@ -23,7 +23,7 @@ APP=""
 for c in "${WEBSDR_JS8_APP_DIR:-}" "$_here/.." "${XDG_DATA_HOME:-$HOME/.local/share}/websdr-js8/app"; do
     [ -n "$c" ] && [ -f "$c/lib/common.sh" ] && { APP="$(cd "$c" && pwd)"; break; }
 done
-[ -n "$APP" ] || { echo "ERROR: can't find JS8Call-CommStat-Receive-Only's lib/ - has it been installed? (run install.sh)" >&2; exit 1; }
+[ -n "$APP" ] || { echo "ERROR: can't find WebSDR-Digital-Receive-Only's lib/ - has it been installed? (run install.sh)" >&2; exit 1; }
 # shellcheck source=../lib/common.sh
 . "$APP/lib/common.sh"
 load_config
@@ -108,77 +108,5 @@ fi
 # ----------------------------------------------------------------- routing
 [ "$ROUTE" = 1 ] || { info; info "Skipping audio routing (--no-route). Stop everything with: websdr-js8-stop"; exit 0; }
 
-step "Route your WebSDR's audio into JS8Call"
-
-routed_already() {
-    pactl -f json list sink-inputs 2>/dev/null | python3 -c '
-import json, subprocess, sys
-name = sys.argv[1]
-sinks = {s["name"]: s["index"] for s in json.loads(subprocess.run(["pactl", "-f", "json", "list", "sinks"], capture_output=True, text=True).stdout)}
-want = sinks.get(name)
-sys.exit(0 if want is not None and any(i.get("sink") == want for i in json.load(sys.stdin)) else 1)' "$SINK"
-}
-
-if routed_already; then
-    info "A stream is already routed into $SINK - nothing more to do."
-    info; info "When you're finished: websdr-js8-stop"; exit 0
-fi
-
-cat <<EOF
-1. In your browser, open a web SDR or KiwiSDR and start its audio playing.
-   Tune it to a JS8 frequency in USB mode (for example 7.078 MHz).
-2. Come back here and press Enter.
-EOF
-read -r -p "" _
-
-list_streams() {
-    pactl -f json list sink-inputs 2>/dev/null | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-for i in data:
-    p = i.get("properties", {})
-    label = p.get("application.name", "unknown app")
-    media = p.get("media.name", "")
-    if media:
-        label += " - " + media
-    print("%s\t%s" % (i["index"], label.replace("\t", " ")))'
-}
-
-streams="$(list_streams)"
-if [ -z "$streams" ]; then
-    echo "No audio is playing yet. Start the WebSDR's audio, then run websdr-js8-start again"
-    echo "(it's safe to re-run; everything already started is reused)."
-    exit 1
-fi
-
-choice=""
-if have dialog; then
-    args=()
-    while IFS=$'\t' read -r idx label; do args+=("$idx" "$label"); done <<<"$streams"
-    choice="$(dialog --clear --menu "Which audio stream is the WebSDR?" 15 76 8 "${args[@]}" 3>&1 1>&2 2>&3)" || true
-    clear
-else
-    echo "Which audio stream is the WebSDR?"
-    ids=(); labels=()
-    while IFS=$'\t' read -r idx label; do ids+=("$idx"); labels+=("$label"); done <<<"$streams"
-    select lbl in "${labels[@]}"; do
-        [ -n "${lbl:-}" ] && { choice="${ids[$((REPLY-1))]}"; break; }
-    done
-fi
-[ -n "$choice" ] || { echo "Nothing selected - nothing routed. Run websdr-js8-start again to retry."; exit 1; }
-
-pactl move-sink-input "$choice" "$SINK" || die "couldn't move the stream into $SINK."
-info "Routed stream $choice into $SINK. JS8Call should start decoding within a cycle or two."
-
-# PipeWire/PulseAudio quirk: once one stream from an app is moved into $SINK, it remembers that
-# choice PER APPLICATION, not per tab - so a second, unrelated stream from the same app (another
-# browser tab) can get silently swept in too and go silent. This watcher undoes that for the rest
-# of the session; websdr-js8-stop stops it.
-if have pactl && [ -x "$_here/websdr-js8-watch-sink" ]; then
-    default_sink="$(pactl get-default-sink)"
-    setsid -f "$_here/websdr-js8-watch-sink" "$SINK" "$choice" "$default_sink" \
-        "$DATA_DIR/routing-watcher.log" >/dev/null 2>&1 </dev/null
-    info "Watching for any OTHER app audio that lands on $SINK by mistake (log: $DATA_DIR/routing-watcher.log)."
-fi
-
-info; info "When you're finished: websdr-js8-stop"
+route_browser_stream "$SINK" "JS8Call" "Tune it to a JS8 frequency in USB mode (for example 7.078 MHz)." \
+    websdr-js8-start websdr-js8-stop "$_here/websdr-js8-watch-sink" "$DATA_DIR/routing-watcher.log"

@@ -82,9 +82,51 @@ Every step is idempotent: re-running keeps existing profiles, databases and conn
 ```
 install.sh  uninstall.sh  preflight.sh
 lib/common.sh               settings, validation, audio-device helpers (sourced by everything)
-bin/websdr-js8-start        launcher
-bin/websdr-js8-stop         stopper
+bin/websdr-js8-start        JS8Call + CommStat launcher
+bin/websdr-js8-stop         its stopper
+bin/websdr-js8-watch-sink   stray-audio watcher (used by both stations)
+bin/websdr-fldigi-start     FLDIGI + FLMSG + FLAMP launcher
+bin/websdr-fldigi-stop      its stopper
+bin/websdr-flmsg            FLMSG / FLAMP with the station's own folder and ports
+bin/websdr-flamp              (FLDIGI starts these)
 share/JS8Call-profile.ini.template
 share/seed_commstat.py      CommStat first-run configuration
-tests/run-tests.sh          74 checks; tests/stubs/js8call is the JS8Call stand-in
+tests/run-tests.sh          110 checks; tests/stubs/ holds the JS8Call, FLDIGI, FLMSG and FLAMP stand-ins
 ```
+
+## The FLDIGI station
+
+```
+ browser tab (WebSDR / KiwiSDR audio)
+        |  routed by websdr-fldigi-start
+        v
+ virtual device  "websdr_fldigi"           (FLDIGI listens to "websdr_fldigi.monitor")
+        v
+      FLDIGI  (fldigi --config-dir ~/.fldigi-websdr/ --flmsg-dir ~/.nbems-websdr/,
+        |      XML-RPC 7363, ARQ 7323, KISS 7344/7345)
+        |-- XML-RPC --> FLMSG  (flmsg --flmsg-dir ~/.nbems-websdr/)
+        '-- XML-RPC + ARQ --> FLAMP  (flamp --config-dir ~/.nbems-websdr/)
+
+ FLDIGI's *output* -> virtual device "websdr_fldigi_txvoid"  (transmit audio is discarded)
+```
+
+- **Audio**: FLDIGI is set to its PulseAudio back end and started with
+  `PULSE_SOURCE=websdr_fldigi.monitor PULSE_SINK=websdr_fldigi_txvoid`, which picks its
+  input and output without depending on device numbers.
+- **Its own devices, not the JS8Call station's**: `websdr-js8-stop` removes its devices,
+  which would cut off FLDIGI's audio if they were shared.
+- **Settings are re-applied, not just checked.** FLDIGI rewrites `fldigi_def.xml` when it
+  exits, so the launcher edits it only while FLDIGI is stopped: every start switches off
+  rig control (Hamlib, RigCAT, flrig), every PTT method, PSKReporter/DX-cluster/eQSL/LoTW,
+  transmit RSID and pre-tone; sets its own ports; and points FLDIGI's autostart at the
+  `websdr-flmsg` / `websdr-flamp` wrappers. It then re-reads the file and refuses to
+  start unless the result is receive-only. Settings missing from the file are added, so
+  nothing is left to a default.
+- **A copy, never the original**: the first start copies `~/.fldigi` and rewrites the
+  copy's absolute paths into `~/.fldigi` (such as the macro file) to point at the copy.
+  `~/.fldigi` and `~/.nbems` are only ever read.
+- **Stopping**: FLAMP and FLMSG are closed first (FLAMP can hang if FLDIGI goes first).
+  FLDIGI is asked to close over XML-RPC (`fldigi.terminate`), because a signal makes it
+  exit without saving its settings; a signal is only the fallback.
+- **FLAMP's option name**: its `--help` says `--confg-dir`, but the option FLAMP accepts
+  is `--config-dir`, and it takes the NBEMS folder (FLAMP adds `FLAMP/` itself).

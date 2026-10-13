@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# FLAMP for the receive-only FLDIGI station: its own folder and that FLDIGI's ports.
+# Started by websdr-fldigi-start's FLDIGI (Autostart).
+# --config-dir takes the NBEMS folder; FLAMP uses its FLAMP/ subfolder. (FLAMP's --help
+# spells it "--confg-dir", which FLAMP itself doesn't accept.)
+_here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+for c in "${WEBSDR_JS8_APP_DIR:-}" "$_here/.." "${XDG_DATA_HOME:-$HOME/.local/share}/websdr-js8/app"; do
+    [ -n "$c" ] && [ -f "$c/lib/common.sh" ] && { . "$c/lib/common.sh"; break; }
+done
+load_config
+exec flamp --config-dir "$NBEMS_DIR/" --xmlrpc-server-port "$FL_XMLRPC_PORT" --arq-server-port "$FL_ARQ_PORT" "$@"

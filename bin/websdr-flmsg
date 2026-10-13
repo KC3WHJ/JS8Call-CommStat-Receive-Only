@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# FLMSG for the receive-only FLDIGI station: its own folder, whose FLMSG.prefs points at
+# that FLDIGI's XML-RPC port. Started by websdr-fldigi-start's FLDIGI (Autostart, and
+# when a received message is opened - FLDIGI passes the file as an argument).
+_here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+for c in "${WEBSDR_JS8_APP_DIR:-}" "$_here/.." "${XDG_DATA_HOME:-$HOME/.local/share}/websdr-js8/app"; do
+    [ -n "$c" ] && [ -f "$c/lib/common.sh" ] && { . "$c/lib/common.sh"; break; }
+done
+load_config
+exec flmsg --flmsg-dir "$NBEMS_DIR/" "$@"

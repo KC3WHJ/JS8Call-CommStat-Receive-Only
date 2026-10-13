@@ -1,6 +1,6 @@
 # Using it
 
-## A session, start to finish
+## JS8Call + CommStat: a session, start to finish
 
 1. **Start the station.** Run `websdr-js8-start` in a terminal, or use *Start WebSDR
    JS8Call + CommStat* from your applications menu or Desktop. It creates two
@@ -72,7 +72,38 @@ CommStat's *JS8 Connectors* dialog, select the `WebSDR` row and click **Reconnec
 ## Changing settings
 
 Settings live in `~/.config/websdr-js8/config` (plain `KEY=VALUE` lines): the JS8Call
-profile name, the two virtual-device names, the JS8Call API ports, and your callsign
+profile name, the virtual-device names, the JS8Call API ports, the FLDIGI station's
+folders, devices and ports (`FLDIGI_DIR`, `NBEMS_DIR`, `FL_SINK`, `FL_TXVOID`,
+`FL_XMLRPC_PORT`, `FL_ARQ_PORT`, `FL_KISS_IO_PORT`, `FL_KISS_OUT_PORT`), and your callsign
 and grid. Environment variables named `WEBSDR_JS8_<KEY>` override them (for example
 `WEBSDR_JS8_TCP_PORT=2500 websdr-js8-start`). Callsign, grid and state are also stored
 inside JS8Call's and CommStat's own settings; change them there.
+
+## FLDIGI + FLMSG + FLAMP: a session, start to finish
+
+1. **Start the station.** Run `websdr-fldigi-start`, or use *Start WebSDR FLDIGI +
+   FLMSG/FLAMP* from your applications menu or Desktop. The first time, it creates the
+   station's own settings: a copy of `~/.fldigi` (so your macros, frequency list and
+   modem settings carry over) in `~/.fldigi-websdr`, and FLMSG/FLAMP settings in
+   `~/.nbems-websdr`. If you've never run FLDIGI, it starts from fresh settings with
+   the callsign and grid you gave the installer.
+2. Every start then switches off rig control, PTT and spotting, creates two virtual
+   audio devices, and starts FLDIGI, which opens FLMSG and FLAMP.
+3. **Play and tune a web SDR** in **USB** mode, to the dial frequency you'd use on a
+   radio. Signals appear at their audio offsets in FLDIGI's waterfall (for example an
+   AmRRON net on 7.110 MHz dial with Contestia at 900 Hz).
+4. **Route the audio**: press Enter in the launcher window and pick the browser stream.
+5. **Watch it decode.** Click a signal in the waterfall, or let RSID switch the mode
+   for you. Received FLMSG forms open in FLMSG; FLAMP collects received files in
+   `~/.nbems-websdr/FLAMP/rx`.
+6. **Stop.** `websdr-fldigi-stop` closes FLAMP, FLMSG and FLDIGI (asking FLDIGI to
+   close itself, so it saves its settings) and removes its virtual audio devices.
+
+Both stations can run at the same time: they use different audio devices and ports.
+Play each in its own browser tab (one per frequency) and pick the right tab in each
+launcher. The FLDIGI station can also run beside a normal, radio-connected FLDIGI.
+
+| Command | Effect |
+|---|---|
+| `websdr-fldigi-start --no-route` | Start FLDIGI, FLMSG and FLAMP but skip the audio-routing step. |
+| `websdr-fldigi-start` again | Safe at any time: re-routes the audio and reuses everything already running. |
