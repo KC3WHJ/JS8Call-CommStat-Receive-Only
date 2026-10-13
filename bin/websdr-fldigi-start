@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# Start the receive-only FLDIGI + FLMSG + FLAMP station.
+#
+#   websdr-fldigi-start [--no-route]
+#
+# What it does, in order:
+#   1. On first run, creates FLDIGI settings of its own (a copy of ~/.fldigi if you
+#      have one, so your macros and frequency list carry over) and FLMSG/FLAMP
+#      settings of their own. A normal FLDIGI setup is never touched.
+#   2. Applies the receive-only settings - no rig control, no PTT of any kind, no
+#      spotting - and refuses to start if they can't be confirmed (receive-only guard).
+#   3. Creates two virtual audio devices: one your WebSDR's audio is played into
+#      (FLDIGI listens to it), and one FLDIGI's *transmit* audio is thrown away in.
+#   4. Starts FLDIGI on its own ports; FLDIGI then opens FLMSG and FLAMP, which
+#      talk only to this FLDIGI.
+#   5. Helps you route the browser tab that is playing the WebSDR into (3).
+#
+# Everything is detached from the terminal window that ran this: closing that
+# window does NOT stop it. Use websdr-fldigi-stop.
+set -u
+
+_self="$(readlink -f "${BASH_SOURCE[0]}")"
+_here="$(dirname "$_self")"
+APP=""
+for c in "${WEBSDR_JS8_APP_DIR:-}" "$_here/.." "${XDG_DATA_HOME:-$HOME/.local/share}/websdr-js8/app"; do
+    [ -n "$c" ] && [ -f "$c/lib/common.sh" ] && { APP="$(cd "$c" && pwd)"; break; }
+done
+[ -n "$APP" ] || { echo "ERROR: can't find WebSDR-Digital-Receive-Only's lib/ - has it been installed? (run install.sh)" >&2; exit 1; }
+# shellcheck source=../lib/common.sh
+. "$APP/lib/common.sh"
+load_config
+
+ROUTE=1
+for a in "$@"; do
+    case "$a" in
+        --no-route) ROUTE=0 ;;
+        -h|--help)  sed -n '2,20p' "$_self" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) die "unknown option: $a" ;;
+    esac
+done
+
+have fldigi || die "fldigi isn't installed. Run install.sh first (or: sudo apt install fldigi flmsg flamp)."
+have pactl  || die "pactl isn't installed (sudo apt install pulseaudio-utils)."
+pactl info >/dev/null 2>&1 || die "can't reach the audio server (PulseAudio/PipeWire). Run this inside your desktop session."
+
+FL_DATA="$DATA_DIR/fldigi"
+XML="$FLDIGI_DIR/fldigi_def.xml"
+FL_PAT="fldigi --config-dir $FLDIGI_DIR/"
+fldigi_running() { pgrep -f "$FL_PAT" >/dev/null 2>&1; }
+mkdir -p "$FL_DATA"
+
+# --------------------------------------------------------- settings helpers
+# Set one FLDIGI setting, adding it if this file doesn't have it yet (FLDIGI reads them in any order).
+xml_set() {  # key value
+    if grep -q "^<$1>" "$XML"; then
+        sed -i "s|^<$1>.*</$1>|<$1>$2</$1>|" "$XML"
+    else
+        sed -i "s|^</FLDIGI_DEFS>|<$1>$2</$1>\n</FLDIGI_DEFS>|" "$XML"
+    fi
+}
+xml_get() { sed -n "s|^<$1>\(.*\)</$1>\$|\1|p" "$XML" | head -1; }
+# Set one FLMSG/FLAMP preference ("key:value" lines), creating the file if needed.
+pref_set() {  # file application key value
+    if [ ! -f "$1" ]; then
+        mkdir -p "$(dirname "$1")"
+        printf '; FLTK preferences file format 1.0\n; vendor: w1hkj.com\n; application: %s\n\n[.]\n\n' "$2" > "$1"
+    fi
+    if grep -q "^$3:" "$1"; then sed -i "s|^$3:.*|$3:$4|" "$1"; else echo "$3:$4" >> "$1"; fi
+}
+
+# ------------------------------------------------------------ first-run setup
+if [ ! -f "$XML" ]; then
+    step "Creating FLDIGI settings for the WebSDR station ($FLDIGI_DIR)"
+    if [ -f "$HOME/.fldigi/fldigi_def.xml" ]; then
+        # Start from the normal setup so macros, the frequency list and modem settings carry
+        # over. Everything that could key a radio is switched off below.
+        cp -a "$HOME/.fldigi" "$FLDIGI_DIR"
+        rm -rf "$FLDIGI_DIR"/temp/* "$FLDIGI_DIR"/debug/* "$FLDIGI_DIR"/fldigi_def.xml-old
+        info "Copied from ~/.fldigi (your normal FLDIGI settings are left as they are)."
+    else
+        mkdir -p "$FLDIGI_DIR"
+        printf '<FLDIGI_DEFS>\n</FLDIGI_DEFS>\n' > "$XML"
+        info "Created fresh settings."
+    fi
+    [ -n "$CALLSIGN" ] && xml_set MYCALL "$CALLSIGN"
+    [ -n "$GRID" ]     && xml_set MYLOC "$GRID"
+fi
+if [ ! -f "$NBEMS_DIR/FLMSG.prefs" ]; then
+    step "Creating FLMSG/FLAMP settings for the WebSDR station ($NBEMS_DIR)"
+    mkdir -p "$NBEMS_DIR/FLAMP"
+    # Settings and custom forms carry over; received messages don't.
+    [ -f "$HOME/.nbems/FLMSG.prefs" ]       && cp -a "$HOME/.nbems/FLMSG.prefs" "$NBEMS_DIR/"
+    [ -d "$HOME/.nbems/CUSTOM" ]            && cp -a "$HOME/.nbems/CUSTOM" "$NBEMS_DIR/"
+    [ -f "$HOME/.nbems/FLAMP/FLAMP.prefs" ] && cp -a "$HOME/.nbems/FLAMP/FLAMP.prefs" "$NBEMS_DIR/FLAMP/"
+    if [ -n "$CALLSIGN" ]; then
+        pref_set "$NBEMS_DIR/FLMSG.prefs" FLMSG mycall "$CALLSIGN"
+        pref_set "$NBEMS_DIR/FLAMP/FLAMP.prefs" FLAMP mycall "$CALLSIGN"
+    fi
+fi
+
+# ------------------------------------------------------ receive-only settings
+# A receive-only station must not be able to key a radio. FLDIGI rewrites its settings when
+# it exits, so they are (re)applied here, while it's stopped, on every start - which also
+# undoes anything changed later in Configure > Rig Control.
+if fldigi_running; then
+    step "FLDIGI (WebSDR) is already running - leaving its settings alone"
+else
+    step "Applying receive-only settings"
+    # Audio through PulseAudio/PipeWire; which devices is set at launch (PULSE_SOURCE/PULSE_SINK).
+    xml_set AUDIOIO 2; xml_set PULSESERVER ""
+    # No rig control of any kind (Hamlib, RigCAT, flrig/XML-RPC).
+    for k in CHKUSEHAMLIBIS CHKUSERIGCATIS CHKUSEXMLRPCIS FLRIG_AUTO_ENABLE FLRIG_KEYS_MODEM CLIENT_TO_FLRIG; do xml_set "$k" 0; done
+    # No PTT or keying line of any kind.
+    for k in HAMLIBCMDPTT RIGCATCMDPTT TTYPTT RTSPTT DTRPTT RTSPLUS DTRPLUS USEUHROUTERPTT USEPPORTPTT \
+             USE_GPIO_PTT ENABLE_GPIO USE_GPIO_CW ENABLE_GPIO_CW PTTRIGHTCHANNEL RIGCATRTSPTT RIGCATDTRPTT \
+             CWKEYLINE PTTKEYLINE FSK_ON_DTR; do xml_set "$k" 0; done
+    for k in CMEDIA_DEVICE NANOSERIALPORTNAME NAVFSKPORT NAVCONFIGPORT; do xml_set "$k" NONE; done
+    # No spotting or uploads: this station hears a REMOTE receiver, so anything it reported
+    # would be attributed to YOUR callsign and location.
+    for k in USEPSKREP PSKREP_AUTOSTART PSKREPAUTO PSKREPLOG DXC_AUTO_CONNECT SPOT_WHEN_LOGGED EQSL_WHEN_LOGGED SUBMIT_LOTW; do xml_set "$k" 0; done
+    # Nothing to key up for.
+    xml_set TRANSMITRSID 0; xml_set PRETONE 0
+    # Its own ports, and FLMSG/FLAMP started with this station's settings.
+    xml_set XMLRPC_PORT "$FL_XMLRPC_PORT"; xml_set ARQ_PORT "$FL_ARQ_PORT"
+    xml_set KISS_IO_PORT "$FL_KISS_IO_PORT"; xml_set KISS_OUT_PORT "$FL_KISS_OUT_PORT"
+    xml_set AUTO_FLAMP_PATHNAME "$_here/websdr-flamp"; xml_set FLAMP_AUTO_ENABLE 1
+    xml_set AUTO_PROG1_PATHNAME "$_here/websdr-flmsg"; xml_set PROG1_AUTO_ENABLE 1
+    xml_set FLMSG_PATHNAME "$_here/websdr-flmsg"
+    # A copied setup keeps absolute paths into ~/.fldigi (e.g. the macro file); point them here.
+    sed -i "s|$HOME/\.fldigi/|$FLDIGI_DIR/|g" "$XML"
+    [ -f "$FLDIGI_DIR/fldigi.prefs" ] && sed -i "s|$HOME/\.fldigi/|$FLDIGI_DIR/|g" "$FLDIGI_DIR/fldigi.prefs"
+
+    # FLMSG and FLAMP: talk to this FLDIGI, and never transmit on their own.
+    pref_set "$NBEMS_DIR/FLMSG.prefs" FLMSG xmlrpc_port "$FL_XMLRPC_PORT"
+    F="$NBEMS_DIR/FLAMP/FLAMP.prefs"
+    pref_set "$F" FLAMP xmlrpc_port "$FL_XMLRPC_PORT"; pref_set "$F" FLAMP socket_port "$FL_ARQ_PORT"
+    for k in repeat_forever repeat_at_times use_tx_on_report enable_tx_unproto auto_load_queue use_repeater_interval; do
+        pref_set "$F" FLAMP "$k" 0
+    done
+
+    # The guard: check the result rather than trusting the edits above.
+    guard_fail() { die "receive-only guard: $1
+  This station is meant to be receive-only, so it will not start like this.
+  Check $XML (or delete $FLDIGI_DIR to start over)."; }
+    for k in CHKUSEHAMLIBIS CHKUSERIGCATIS CHKUSEXMLRPCIS HAMLIBCMDPTT RIGCATCMDPTT TTYPTT RTSPTT DTRPTT \
+             USEUHROUTERPTT USEPPORTPTT USE_GPIO_PTT PTTRIGHTCHANNEL CWKEYLINE PTTKEYLINE \
+             USEPSKREP PSKREP_AUTOSTART PSKREPAUTO PSKREPLOG; do
+        [ "$(xml_get "$k")" = 0 ] || guard_fail "$k is '$(xml_get "$k")' (must be 0)."
+    done
+    [ "$(xml_get AUDIOIO)" = 2 ] || guard_fail "FLDIGI's audio isn't set to PulseAudio, so it can't be pointed at the discard device."
+    info "No rig control, no PTT, no spotting; transmit audio is discarded."
+fi
+
+# ------------------------------------------------------- virtual audio devices
+step "Virtual audio devices"
+ensure_null_sink "$FL_SINK"   "WebSDR_FLDIGI_Receive"    || die "couldn't create the '$FL_SINK' audio device."
+ensure_null_sink "$FL_TXVOID" "WebSDR_FLDIGI_TX_Discard" || die "couldn't create the '$FL_TXVOID' audio device."
+info "Ready: $FL_SINK (WebSDR audio in), $FL_TXVOID (transmit audio discarded)."
+
+# ------------------------------------------------------------------ FLDIGI
+step "FLDIGI (settings: $FLDIGI_DIR)"
+if fldigi_running; then
+    info "Already running."
+else
+    # PULSE_SOURCE/PULSE_SINK choose FLDIGI's input and output devices. Same detach as the
+    # JS8Call station (setsid -f + nohup), so closing this terminal can't close FLDIGI.
+    PULSE_SOURCE="$FL_SINK.monitor" PULSE_SINK="$FL_TXVOID" \
+        setsid -f nohup fldigi --config-dir "$FLDIGI_DIR/" --flmsg-dir "$NBEMS_DIR/" \
+            --xmlrpc-server-port "$FL_XMLRPC_PORT" --arq-server-port "$FL_ARQ_PORT" \
+            --kiss-server-port-io "$FL_KISS_IO_PORT" --kiss-server-port-o "$FL_KISS_OUT_PORT" \
+            --rx-ipc-key "$FL_IPC_KEY" \
+            >"$FL_DATA/fldigi.log" 2>&1 </dev/null
+    info "Started (log: $FL_DATA/fldigi.log). FLMSG and FLAMP open with it."
+fi
+
+# ----------------------------------------------------------------- routing
+[ "$ROUTE" = 1 ] || { info; info "Skipping audio routing (--no-route). Stop with: websdr-fldigi-stop"; exit 0; }
+
+route_browser_stream "$FL_SINK" "FLDIGI" \
+    "Tune it in USB to the dial frequency you'd use on a radio (e.g. 7.110 MHz)." \
+    websdr-fldigi-start websdr-fldigi-stop "$_here/websdr-js8-watch-sink" "$FL_DATA/routing-watcher.log"

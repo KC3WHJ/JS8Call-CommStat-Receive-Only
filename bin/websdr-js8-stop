@@ -11,7 +11,7 @@ APP=""
 for c in "${WEBSDR_JS8_APP_DIR:-}" "$_here/.." "${XDG_DATA_HOME:-$HOME/.local/share}/websdr-js8/app"; do
     [ -n "$c" ] && [ -f "$c/lib/common.sh" ] && { APP="$(cd "$c" && pwd)"; break; }
 done
-[ -n "$APP" ] || { echo "ERROR: can't find JS8Call-CommStat-Receive-Only's lib/ - has it been installed?" >&2; exit 1; }
+[ -n "$APP" ] || { echo "ERROR: can't find WebSDR-Digital-Receive-Only's lib/ - has it been installed?" >&2; exit 1; }
 # shellcheck source=../lib/common.sh
 . "$APP/lib/common.sh"
 load_config

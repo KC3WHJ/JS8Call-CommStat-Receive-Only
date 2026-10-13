@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Installer for JS8Call-CommStat-Receive-Only: a receive-only JS8Call + CommStat station
-# fed by a web SDR / KiwiSDR audio stream (no radio, no transmitting).
+# Installer for WebSDR-Digital-Receive-Only: receive-only JS8Call + CommStat and
+# FLDIGI + FLMSG + FLAMP stations fed by a web SDR / KiwiSDR audio stream (no radio,
+# no transmitting).
 #
 #   ./install.sh                  check prerequisites, then install
 #   ./install.sh --check          prerequisite check only (changes nothing)
@@ -10,6 +11,7 @@
 #   -y, --yes                     don't stop to ask; accept warnings
 #   --skip-apt                    don't install packages (you've done it already)
 #   --skip-commstat-deps          don't run CommStat's own dependency installer
+#   --no-fldigi                   leave out the FLDIGI + FLMSG + FLAMP station
 #   --no-desktop-icons            don't create Desktop shortcuts
 #   --no-network, --no-gui-check  skip those prerequisite checks (testing only)
 #   -h, --help                    this text
@@ -24,12 +26,13 @@ HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=preflight.sh
 . "$HERE/preflight.sh"
 
-ASSUME_YES=0; CHECK_ONLY=0; SKIP_APT=0; SKIP_CS_DEPS=0; DESKTOP_ICONS=1
+ASSUME_YES=0; CHECK_ONLY=0; SKIP_APT=0; SKIP_CS_DEPS=0; DESKTOP_ICONS=1; WITH_FLDIGI=1
 OPT_CALL=""; OPT_GRID=""; OPT_STATE=""
 COMMSTAT_URL="${WEBSDR_JS8_COMMSTAT_URL:-https://github.com/mgochoa57/CommStat.git}"
 BIN_DIR="${WEBSDR_JS8_BIN_DIR:-$HOME/.local/bin}"
 RIG_NAME="WebSDR"     # the connector's name inside CommStat
 APT_PACKAGES="js8call git dialog pulseaudio-utils python3 ca-certificates curl"
+FLDIGI_PACKAGES="fldigi flmsg flamp"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -37,13 +40,14 @@ while [ $# -gt 0 ]; do
         -y|--yes)             ASSUME_YES=1 ;;
         --skip-apt)           SKIP_APT=1 ;;
         --skip-commstat-deps) SKIP_CS_DEPS=1 ;;
+        --no-fldigi)          WITH_FLDIGI=0 ;;
         --no-desktop-icons)   DESKTOP_ICONS=0 ;;
         --no-network)         PF_NETWORK=0 ;;     # skip the internet checks (offline testing)
         --no-gui-check)       PF_GUI=0 ;;         # skip the desktop-session check (headless testing)
         --callsign)           OPT_CALL="${2:?--callsign needs a value}"; shift ;;
         --grid)               OPT_GRID="${2:?--grid needs a value}"; shift ;;
         --state)              OPT_STATE="${2:?--state needs a value}"; shift ;;
-        -h|--help)            sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)            sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
     esac
     shift
@@ -106,13 +110,16 @@ if [ "$SKIP_APT" = 1 ]; then
     step "Packages"; info "Skipped (--skip-apt)."
 else
     step "Installing packages (sudo password may be requested)"
-    # Keep a JS8Call that's already installed. Distros like EmComm Tools ship their own
-    # build; "upgrading" it to the distro package can pull in wsjtx-data, which clashes
-    # with a separately installed WSJT-X and leaves apt broken.
-    if have js8call; then
-        APT_PACKAGES="$(echo " $APT_PACKAGES " | sed 's/ js8call / /; s/^ //; s/ $//')"
-        info "JS8Call is already installed - keeping it as it is."
-    fi
+    [ "$WITH_FLDIGI" = 1 ] && APT_PACKAGES="$APT_PACKAGES $FLDIGI_PACKAGES"
+    # Keep programs that are already installed. Distros like EmComm Tools ship their own
+    # builds; "upgrading" JS8Call to the distro package, for example, can pull in wsjtx-data,
+    # which clashes with a separately installed WSJT-X and leaves apt broken.
+    for p in js8call $FLDIGI_PACKAGES; do
+        if have "$p"; then
+            APT_PACKAGES="$(echo " $APT_PACKAGES " | sed "s/ $p / /; s/^ //; s/ \$//")"
+            info "$p is already installed - keeping it as it is."
+        fi
+    done
     info "Packages: $APT_PACKAGES"
     sudo apt-get update
     # shellcheck disable=SC2086
@@ -186,6 +193,11 @@ cp "$HERE/lib/common.sh" "$DATA_DIR/app/lib/"
 cp "$HERE/share/JS8Call-profile.ini.template" "$HERE/share/seed_commstat.py" "$DATA_DIR/app/share/"
 install -m 0755 "$HERE/bin/websdr-js8-start" "$HERE/bin/websdr-js8-stop" "$HERE/bin/websdr-js8-watch-sink" "$BIN_DIR/"
 info "Installed websdr-js8-start, websdr-js8-stop and websdr-js8-watch-sink in $BIN_DIR"
+if [ "$WITH_FLDIGI" = 1 ]; then
+    install -m 0755 "$HERE/bin/websdr-fldigi-start" "$HERE/bin/websdr-fldigi-stop" \
+        "$HERE/bin/websdr-flmsg" "$HERE/bin/websdr-flamp" "$BIN_DIR/"
+    info "Installed websdr-fldigi-start, websdr-fldigi-stop, websdr-flmsg and websdr-flamp in $BIN_DIR"
+fi
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) warn "$BIN_DIR isn't on your PATH yet - log out and back in, or run: export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
 
 APPS_DIR="$DATA_HOME/applications"
@@ -207,13 +219,22 @@ make_desktop "$APPS_DIR/websdr-js8-start.desktop" "Start WebSDR JS8Call + CommSt
     "Receive-only JS8Call and CommStat fed by a web SDR" "$BIN_DIR/websdr-js8-start" network-wireless
 make_desktop "$APPS_DIR/websdr-js8-stop.desktop"  "Stop WebSDR JS8Call + CommStat" \
     "Stops the receive-only station and removes its virtual audio devices" "$BIN_DIR/websdr-js8-stop" process-stop
-info "Added both to your applications menu."
+SHORTCUTS="websdr-js8-start websdr-js8-stop"
+if [ "$WITH_FLDIGI" = 1 ]; then
+    fl_icon="$(ls /usr/share/pixmaps/fldigi.* /usr/local/share/pixmaps/fldigi.* 2>/dev/null | head -1)"
+    make_desktop "$APPS_DIR/websdr-fldigi-start.desktop" "Start WebSDR FLDIGI + FLMSG/FLAMP" \
+        "Receive-only FLDIGI, FLMSG and FLAMP fed by a web SDR" "$BIN_DIR/websdr-fldigi-start" "${fl_icon:-fldigi}"
+    make_desktop "$APPS_DIR/websdr-fldigi-stop.desktop"  "Stop WebSDR FLDIGI + FLMSG/FLAMP" \
+        "Stops the receive-only FLDIGI station and removes its virtual audio devices" "$BIN_DIR/websdr-fldigi-stop" process-stop
+    SHORTCUTS="$SHORTCUTS websdr-fldigi-start websdr-fldigi-stop"
+fi
+info "Added the launchers to your applications menu."
 if [ "$DESKTOP_ICONS" = 1 ]; then
     DESK="$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")"
     if [ -d "$DESK" ]; then
-        cp "$APPS_DIR/websdr-js8-start.desktop" "$APPS_DIR/websdr-js8-stop.desktop" "$DESK/"
-        for f in "$DESK/websdr-js8-start.desktop" "$DESK/websdr-js8-stop.desktop"; do
-            gio set "$f" "metadata::trusted" true 2>/dev/null || true
+        for f in $SHORTCUTS; do
+            cp "$APPS_DIR/$f.desktop" "$DESK/"
+            gio set "$DESK/$f.desktop" "metadata::trusted" true 2>/dev/null || true
         done
         info "Added Desktop shortcuts."
     fi
@@ -229,6 +250,13 @@ else warn "CommStat's Qt WebEngine Python modules aren't importable - re-run wit
 [ -f "$COMMSTAT_DIR/traffic.db3" ]   && info "  ok  CommStat database"        || { warn "CommStat database missing"; bad=1; }
 [ -x "$BIN_DIR/websdr-js8-start" ] && [ -x "$BIN_DIR/websdr-js8-watch-sink" ] \
                                      && info "  ok  launchers"                || { warn "launchers missing"; bad=1; }
+if [ "$WITH_FLDIGI" = 1 ]; then
+    for p in fldigi flmsg flamp; do
+        have "$p" && info "  ok  $p: $(command -v "$p")" || { warn "$p not found"; bad=1; }
+    done
+    [ -x "$BIN_DIR/websdr-fldigi-start" ] && [ -x "$BIN_DIR/websdr-flamp" ] \
+                                     && info "  ok  FLDIGI launchers"         || { warn "FLDIGI launchers missing"; bad=1; }
+fi
 
 echo
 if [ "$bad" = 0 ]; then
@@ -245,6 +273,14 @@ Next:
   3. Pick that browser stream when asked. JS8Call starts decoding; CommStat
      connects to it automatically.
   4. When finished:  websdr-js8-stop
+EOF
+[ "$WITH_FLDIGI" = 1 ] && cat <<EOF
+
+FLDIGI + FLMSG + FLAMP works the same way, and can run at the same time:
+  websdr-fldigi-start / websdr-fldigi-stop  (or the "WebSDR FLDIGI" icons)
+  Its settings are created on first start - from a copy of ~/.fldigi if you have one.
+EOF
+cat <<EOF
 
 See docs/USAGE.md for details. To remove everything: ./uninstall.sh
 EOF

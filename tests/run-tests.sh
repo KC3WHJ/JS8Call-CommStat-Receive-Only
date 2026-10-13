@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Test suite for JS8Call-CommStat-Receive-Only.
+# Test suite for WebSDR-Digital-Receive-Only.
 #
 #   tests/run-tests.sh
 #
 # Needs no sudo, no GUI and no internet. Everything runs in a throwaway HOME with
 # its own JS8Call profile name, audio-device names and ports, so it can run next to a
-# live installation without touching it. JS8Call is replaced by a small stand-in
-# (tests/stubs/js8call) and CommStat's GUI by stand-in scripts; CommStat's real
+# live installation without touching it. JS8Call, FLDIGI, FLMSG and FLAMP are replaced
+# by small stand-ins (tests/stubs/) and CommStat's GUI by stand-in scripts; CommStat's real
 # database template and connector code ARE used (copied from $COMMSTAT_SRC,
 # ~/CommStat, or a GitHub clone), so the seeding is tested for real.
 #
@@ -34,10 +34,16 @@ unset XDG_CONFIG_HOME XDG_DATA_HOME WEBSDR_JS8_APP_DIR
 TCP="$(free_port)"; UDP="$(free_port)"
 export WEBSDR_JS8_PROFILE=RxTest WEBSDR_JS8_SINK=rxtest_sink WEBSDR_JS8_TXVOID=rxtest_txvoid
 export WEBSDR_JS8_TCP_PORT="$TCP" WEBSDR_JS8_UDP_PORT="$UDP"
+FLX="$(free_port)"; FLA="$(free_port)"
+export WEBSDR_JS8_FL_SINK=rxtest_fl_sink WEBSDR_JS8_FL_TXVOID=rxtest_fl_txvoid
+export WEBSDR_JS8_FL_XMLRPC_PORT="$FLX" WEBSDR_JS8_FL_ARQ_PORT="$FLA"
+export WEBSDR_JS8_FL_KISS_IO_PORT="$(free_port)" WEBSDR_JS8_FL_KISS_OUT_PORT="$(free_port)"
 export PATH="$ROOT/tests/stubs:$PATH"
 CS="$HOME/.local/share/websdr-js8/CommStat"
 INI="$HOME/.config/JS8Call - RxTest.ini"
 START="$HOME/.local/bin/websdr-js8-start"; STOP="$HOME/.local/bin/websdr-js8-stop"
+FLSTART="$HOME/.local/bin/websdr-fldigi-start"; FLSTOP="$HOME/.local/bin/websdr-fldigi-stop"
+FLDIR="$HOME/.fldigi-websdr"; NBDIR="$HOME/.nbems-websdr"
 
 count_procs() { pgrep -fc "$1" 2>/dev/null || true; }
 modules_for() { pactl list short modules 2>/dev/null | grep -Ec "sink_name=$1([[:space:]]|\$)" || true; }
@@ -47,10 +53,12 @@ cs_pid()      { pgrep -f "python3 $CS/little_gucci.py" | head -1; }
 cleanup() {
     local p
     for p in $(pgrep -f "/js8call -r RxTest( |\$)") $(pgrep -f "python3 $CS/little_gucci.py") \
-             $(pgrep -f "websdr-js8-watch-sink rxtest_sink") $(pgrep -f "paplay.*$T/tone.wav"); do
+             $(pgrep -f "websdr-js8-watch-sink rxtest_sink") $(pgrep -f "paplay.*$T/tone.wav") \
+             $(pgrep -f "fldigi --config-dir $FLDIR/") $(pgrep -f "flmsg --flmsg-dir $NBDIR/") \
+             $(pgrep -f "flamp --config-dir $NBDIR/"); do
         kill "$p" 2>/dev/null
     done
-    for s in rxtest_sink rxtest_txvoid; do
+    for s in rxtest_sink rxtest_txvoid rxtest_fl_sink rxtest_fl_txvoid; do
         for id in $(pactl list short modules 2>/dev/null | awk -v s="sink_name=$s" '$0 ~ s {print $1}'); do pactl unload-module "$id" 2>/dev/null; done
     done
     rm -rf "$T"
@@ -59,12 +67,15 @@ trap cleanup EXIT
 
 # ------------------------------------------------------------------- lint
 section "Syntax"
-for f in install.sh uninstall.sh preflight.sh lib/common.sh bin/websdr-js8-start bin/websdr-js8-stop bin/websdr-js8-watch-sink tests/run-tests.sh; do
+for f in install.sh uninstall.sh preflight.sh lib/common.sh bin/websdr-js8-start bin/websdr-js8-stop bin/websdr-js8-watch-sink \
+         bin/websdr-fldigi-start bin/websdr-fldigi-stop bin/websdr-flmsg bin/websdr-flamp tests/run-tests.sh; do
     t "bash -n $f" bash -n "$ROOT/$f"
 done
 # (parse only - py_compile would write .pyc files into the repo)
 t "python syntax share/seed_commstat.py" python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/share/seed_commstat.py"
-t "python syntax tests/stubs/js8call" python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/tests/stubs/js8call"
+for f in js8call fldigi flmsg flamp; do
+    t "python syntax tests/stubs/$f" python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$ROOT/tests/stubs/$f"
+done
 
 # --------------------------------------------------------------- helpers
 section "Validation helpers and settings"
@@ -316,12 +327,93 @@ PTY_HARNESS_END
     [ "$rc" = 0 ] && ok "guard allows the correct receive-only profile again" || bad "guard blocked a good profile" "$out"
     "$STOP" >/dev/null 2>&1
 
+    # ------------------------------------------------------- FLDIGI station
+    section "FLDIGI + FLMSG + FLAMP station (websdr-fldigi-start / websdr-fldigi-stop)"
+    t "FLDIGI launchers installed and executable" test -x "$FLSTART" -a -x "$FLSTOP" -a -x "$HOME/.local/bin/websdr-flmsg" -a -x "$HOME/.local/bin/websdr-flamp"
+    fl_pid()    { pgrep -f "fldigi --config-dir $FLDIR/" | head -1; }
+    flmsg_pid() { pgrep -f "flmsg --flmsg-dir $NBDIR/" | head -1; }
+    flamp_pid() { pgrep -f "flamp --config-dir $NBDIR/ --xmlrpc-server-port $FLX --arq-server-port $FLA" | head -1; }
+    xmlv()      { sed -n "s|^<$1>\(.*\)</$1>\$|\1|p" "$FLDIR/fldigi_def.xml" | head -1; }
+
+    # A normal, radio-connected FLDIGI setup: rig control, PTT and spotting all ON.
+    mkdir -p "$HOME/.fldigi/macros" "$HOME/.nbems/FLAMP"
+    cat > "$HOME/.fldigi/fldigi_def.xml" <<RADIO_XML_END
+<FLDIGI_DEFS>
+<MYCALL>N0CALL</MYCALL>
+<AUDIOIO>1</AUDIOIO>
+<CHKUSEHAMLIBIS>1</CHKUSEHAMLIBIS>
+<HAMLIBCMDPTT>1</HAMLIBCMDPTT>
+<RTSPTT>1</RTSPTT>
+<USEPSKREP>1</USEPSKREP>
+<PSKREPAUTO>1</PSKREPAUTO>
+<TRANSMITRSID>1</TRANSMITRSID>
+<XMLRPC_PORT>7362</XMLRPC_PORT>
+<AUTO_FLAMP_PATHNAME>/usr/bin/et-flamp start</AUTO_FLAMP_PATHNAME>
+<FLAMP_AUTO_ENABLE>1</FLAMP_AUTO_ENABLE>
+</FLDIGI_DEFS>
+RADIO_XML_END
+    echo "last_macro_file:$HOME/.fldigi/macros/macros.mdf" > "$HOME/.fldigi/fldigi.prefs"
+    printf 'mycall:N0CALL\nxmlrpc_port:7362\n' > "$HOME/.nbems/FLMSG.prefs"
+    printf 'mycall:N0CALL\nxmlrpc_port:7362\nsocket_port:7322\nrepeat_forever:1\n' > "$HOME/.nbems/FLAMP/FLAMP.prefs"
+    radio_sum="$(cat "$HOME/.fldigi/fldigi_def.xml" "$HOME/.fldigi/fldigi.prefs" "$HOME/.nbems/FLMSG.prefs" "$HOME/.nbems/FLAMP/FLAMP.prefs" | md5sum)"
+
+    out="$("$FLSTART" --no-route 2>&1)"; rc=$?
+    [ "$rc" = 0 ] && ok "start exits 0" || bad "FLDIGI start failed (exit $rc)" "$out"
+    sleep 1
+    [ -n "$(fl_pid)" ]    && ok "FLDIGI is running with its own settings folder" || bad "FLDIGI not running" "$out"
+    [ -n "$(flmsg_pid)" ] && ok "FLDIGI started FLMSG with the WebSDR folder"    || bad "FLMSG not running"
+    [ -n "$(flamp_pid)" ] && ok "FLDIGI started FLAMP with the WebSDR folder and ports" || bad "FLAMP not running (or wrong arguments)" "$(pgrep -af flamp)"
+    [ "$(modules_for rxtest_fl_sink)" = 1 ] && [ "$(modules_for rxtest_fl_txvoid)" = 1 ] \
+        && ok "its own receive and discard sinks created (exactly one each)" || bad "FLDIGI sink counts" "$(modules_for rxtest_fl_sink)/$(modules_for rxtest_fl_txvoid)"
+    [ "$(cat "$FLDIR/stub-audio.txt" 2>/dev/null)" = "rxtest_fl_sink.monitor rxtest_fl_txvoid" ] \
+        && ok "FLDIGI hears the receive sink; its transmit audio goes to the discard sink" || bad "FLDIGI audio devices" "$(cat "$FLDIR/stub-audio.txt" 2>/dev/null)"
+    { [ "$(xmlv CHKUSEHAMLIBIS)" = 0 ] && [ "$(xmlv CHKUSERIGCATIS)" = 0 ] && [ "$(xmlv CHKUSEXMLRPCIS)" = 0 ]; } \
+        && ok "copy: rig control OFF (was on in ~/.fldigi)" || bad "rig control still on in the copy"
+    { [ "$(xmlv HAMLIBCMDPTT)" = 0 ] && [ "$(xmlv RTSPTT)" = 0 ] && [ "$(xmlv RIGCATCMDPTT)" = 0 ] && [ "$(xmlv PTTRIGHTCHANNEL)" = 0 ]; } \
+        && ok "copy: every PTT method OFF" || bad "PTT still on in the copy"
+    { [ "$(xmlv USEPSKREP)" = 0 ] && [ "$(xmlv PSKREPAUTO)" = 0 ]; } && ok "copy: PSKReporter spotting OFF" || bad "spotting still on in the copy"
+    { [ "$(xmlv AUDIOIO)" = 2 ] && [ "$(xmlv TRANSMITRSID)" = 0 ]; } && ok "copy: PulseAudio audio, transmit RSID off" || bad "audio/RSID settings"
+    { [ "$(xmlv XMLRPC_PORT)" = "$FLX" ] && [ "$(xmlv ARQ_PORT)" = "$FLA" ]; } && ok "copy: its own XML-RPC and ARQ ports" || bad "ports in the copy"
+    grep -qx "last_macro_file:$FLDIR/macros/macros.mdf" "$FLDIR/fldigi.prefs" \
+        && ok "copy: paths into ~/.fldigi now point at the copy" || bad "macro path" "$(cat "$FLDIR/fldigi.prefs")"
+    { grep -qx "xmlrpc_port:$FLX" "$NBDIR/FLMSG.prefs" && grep -qx "xmlrpc_port:$FLX" "$NBDIR/FLAMP/FLAMP.prefs" \
+      && grep -qx "socket_port:$FLA" "$NBDIR/FLAMP/FLAMP.prefs" && grep -qx "repeat_forever:0" "$NBDIR/FLAMP/FLAMP.prefs"; } \
+        && ok "FLMSG/FLAMP: talk to this FLDIGI, FLAMP's automatic repeat off" || bad "FLMSG/FLAMP prefs" "$(cat "$NBDIR/FLAMP/FLAMP.prefs")"
+    [ "$(cat "$HOME/.fldigi/fldigi_def.xml" "$HOME/.fldigi/fldigi.prefs" "$HOME/.nbems/FLMSG.prefs" "$HOME/.nbems/FLAMP/FLAMP.prefs" | md5sum)" = "$radio_sum" ] \
+        && ok "the normal ~/.fldigi and ~/.nbems settings are untouched" || bad "radio settings were modified!"
+
+    "$FLSTART" --no-route >/dev/null 2>&1
+    { [ "$(count_procs "fldigi --config-dir $FLDIR/")" = 1 ] && [ "$(modules_for rxtest_fl_sink)" = 1 ]; } \
+        && ok "starting twice reuses everything" || bad "second FLDIGI start duplicated something"
+
+    out="$("$FLSTOP" 2>&1)"
+    { [ -z "$(fl_pid)" ] && [ -z "$(flmsg_pid)" ] && [ -z "$(flamp_pid)" ] && [ "$(modules_for rxtest_fl_sink)" = 0 ] && [ "$(modules_for rxtest_fl_txvoid)" = 0 ]; } \
+        && ok "stop ends FLDIGI, FLMSG, FLAMP and removes both sinks" || bad "FLDIGI stop left something" "$out"
+    echo "$out" | grep -q "without saving\|forced" && bad "FLDIGI wasn't closed gracefully" "$out" || ok "FLDIGI is closed through XML-RPC (so it saves its settings)"
+
+    # Rig control switched on later inside FLDIGI must be undone at the next start.
+    sed -i 's|^<CHKUSEHAMLIBIS>.*|<CHKUSEHAMLIBIS>1</CHKUSEHAMLIBIS>|; s|^<USEPSKREP>.*|<USEPSKREP>1</USEPSKREP>|' "$FLDIR/fldigi_def.xml"
+    out="$("$FLSTART" --no-route 2>&1)"; rc=$?
+    { [ "$rc" = 0 ] && [ "$(xmlv CHKUSEHAMLIBIS)" = 0 ] && [ "$(xmlv USEPSKREP)" = 0 ]; } \
+        && ok "rig control / spotting turned on later are switched off again at start" || bad "settings not re-applied" "$out"
+    "$FLSTOP" >/dev/null 2>&1
+
+    # A machine that has never run FLDIGI.
+    rm -rf "$FLDIR" "$NBDIR" "$HOME/.fldigi" "$HOME/.nbems"
+    out="$("$FLSTART" --no-route 2>&1)"; rc=$?
+    { [ "$rc" = 0 ] && [ -n "$(fl_pid)" ] && [ "$(xmlv MYCALL)" = N0CALL ] && [ "$(xmlv CHKUSEHAMLIBIS)" = 0 ] && grep -qx "mycall:N0CALL" "$NBDIR/FLMSG.prefs"; } \
+        && ok "with no ~/.fldigi, fresh receive-only settings are created (callsign from the install)" || bad "fresh FLDIGI setup" "$out"
+    "$FLSTOP" >/dev/null 2>&1
+    { [ ! -e "$HOME/.fldigi" ] && [ ! -e "$HOME/.nbems" ]; } && ok "...without creating ~/.fldigi or ~/.nbems" || bad "created normal FLDIGI folders"
+
     # ------------------------------------------------------------ uninstall
     section "Uninstaller"
     out="$("$ROOT/uninstall.sh" --purge --yes 2>&1)"; rc=$?
     [ "$rc" = 0 ] && ok "uninstall exits 0" || bad "uninstall failed" "$out"
     { [ ! -e "$START" ] && [ ! -e "$STOP" ] && [ ! -e "$HOME/.config/websdr-js8" ] && [ ! -e "$INI" ] && [ ! -e "$CS" ]; } \
         && ok "removes launchers, settings, JS8Call profile and CommStat folder" || bad "uninstall left files behind" "$(find "$HOME" -type f | head)"
+    { [ ! -e "$FLSTART" ] && [ ! -e "$FLSTOP" ] && [ ! -e "$HOME/.local/bin/websdr-flamp" ] && [ ! -e "$FLDIR" ] && [ ! -e "$NBDIR" ]; } \
+        && ok "removes the FLDIGI launchers and the WebSDR FLDIGI/FLMSG/FLAMP folders" || bad "uninstall left FLDIGI files behind" "$(ls -a "$HOME" "$HOME/.local/bin" 2>&1)"
     "$ROOT/uninstall.sh" --purge --yes >/dev/null 2>&1 && ok "a second uninstall is harmless" || bad "second uninstall failed"
 fi
 

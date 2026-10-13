@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prerequisite check for JS8Call-CommStat-Receive-Only.
+# Prerequisite check for WebSDR-Digital-Receive-Only.
 #
 # Read-only: it installs nothing, changes nothing, and never asks for sudo.
 # install.sh runs this first and refuses to touch your system if anything is
@@ -165,7 +165,19 @@ check_apt() {
         elif apt_lists_empty; then
             result WARN "package: $pkg" "can't tell - apt has no package lists yet" "Run 'sudo apt update' first, then check again."
         else
-            result FAIL "package: $pkg" "not available from your apt sources" "Enable the 'universe' component (Ubuntu) / check your Mint sources, then 'sudo apt update'."
+            result FAIL "package: $pkg" "not available from your apt sources" "Enable the 'universe' component (Ubuntu) / check your Mint sources, then 'sudo apt update'. On an end-of-life Ubuntu release, point apt at old-releases.ubuntu.com."
+        fi
+    done
+    # The FLDIGI station is optional (install.sh --no-fldigi), so these only warn.
+    for pkg in fldigi flmsg flamp; do
+        if have "$pkg"; then
+            result OK "program: $pkg" "already installed ($(command -v "$pkg"))"
+        elif [ -n "$(apt_candidate "$pkg")" ]; then
+            result OK "package: $pkg" "available ($(apt_candidate "$pkg"))"
+        elif apt_lists_empty; then
+            result WARN "package: $pkg" "can't tell - apt has no package lists yet" "Run 'sudo apt update' first, then check again."
+        else
+            result WARN "package: $pkg" "not available from your apt sources" "Needed only for the FLDIGI station. Install it another way, or run the installer with --no-fldigi."
         fi
     done
 }
@@ -226,6 +238,15 @@ check_settings() {
     valid_port "$UDP_PORT" || { result FAIL "Setting: UDP_PORT" "'$UDP_PORT' is not a port between 1024 and 65535" ""; bad=1; }
     [ "$SINK" = "$TXVOID" ] && { result FAIL "Setting: SINK/TXVOID" "the receive and discard sinks must be different" ""; bad=1; }
     [ "$bad" = 0 ] && result OK "Settings" "profile '$PROFILE', ports $TCP_PORT/$UDP_PORT, sinks $SINK / $TXVOID"
+    local k fbad=0
+    for k in FL_SINK FL_TXVOID; do valid_name "${!k}" || { result FAIL "Setting: $k" "'${!k}' - use letters, digits and underscores only" ""; fbad=1; }; done
+    for k in FL_XMLRPC_PORT FL_ARQ_PORT FL_KISS_IO_PORT FL_KISS_OUT_PORT; do
+        valid_port "${!k}" || { result FAIL "Setting: $k" "'${!k}' is not a port between 1024 and 65535" ""; fbad=1; }
+    done
+    case " $SINK $TXVOID " in *" $FL_SINK "*|*" $FL_TXVOID "*)
+        result FAIL "Setting: FL_SINK/FL_TXVOID" "the FLDIGI station's audio devices must differ from the JS8Call station's" ""; fbad=1 ;; esac
+    [ "$FL_SINK" = "$FL_TXVOID" ] && { result FAIL "Setting: FL_SINK/FL_TXVOID" "the receive and discard sinks must be different" ""; fbad=1; }
+    [ "$fbad" = 0 ] && result OK "FLDIGI settings" "ports $FL_XMLRPC_PORT/$FL_ARQ_PORT, sinks $FL_SINK / $FL_TXVOID"
 }
 
 check_existing() {
@@ -240,7 +261,15 @@ check_existing() {
     else
         result OK "TCP port $TCP_PORT" "free"
     fi
+    local p fl_ours=0
+    pgrep -f "fldigi --config-dir $FLDIGI_DIR/" >/dev/null 2>&1 && fl_ours=1
+    for p in "$FL_XMLRPC_PORT" "$FL_ARQ_PORT"; do
+        if ! port_in_use "$p"; then result OK "TCP port $p" "free (FLDIGI station)"
+        elif [ "$fl_ours" = 1 ]; then result OK "TCP port $p" "in use by this install's own FLDIGI"
+        else result WARN "TCP port $p" "already in use by something else" "The FLDIGI station needs it. Set FL_XMLRPC_PORT / FL_ARQ_PORT in $CONFIG_DIR/config."; fi
+    done
     [ -f "$JS8_INI" ] && result OK "JS8Call profile" "$JS8_INI exists - it will be kept, not overwritten"
+    [ -f "$FLDIGI_DIR/fldigi_def.xml" ] && result OK "FLDIGI settings" "$FLDIGI_DIR exists - it will be kept (receive-only settings are re-applied at each start)"
     [ -d "$COMMSTAT_DIR/.git" ] && result OK "CommStat" "existing install at $COMMSTAT_DIR - it will be reused, not overwritten"
     return 0
 }
@@ -248,7 +277,7 @@ check_existing() {
 # --------------------------------------------------------------------- main
 run_preflight() {
     N_OK=0; N_WARN=0; N_FAIL=0
-    printf '%sJS8Call-CommStat-Receive-Only %s - prerequisite check%s\n' "$C_BLD" "$WEBSDR_JS8_VERSION" "$C_OFF"
+    printf '%sWebSDR-Digital-Receive-Only %s - prerequisite check%s\n' "$C_BLD" "$WEBSDR_JS8_VERSION" "$C_OFF"
     printf '%sRead-only: nothing is installed or changed.%s\n\n' "$C_DIM" "$C_OFF"
     check_os; check_arch; check_user; check_resources; check_tools
     check_network; check_apt; check_audio; check_desktop; check_clock
