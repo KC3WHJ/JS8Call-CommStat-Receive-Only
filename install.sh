@@ -106,6 +106,13 @@ if [ "$SKIP_APT" = 1 ]; then
     step "Packages"; info "Skipped (--skip-apt)."
 else
     step "Installing packages (sudo password may be requested)"
+    # Keep a JS8Call that's already installed. Distros like EmComm Tools ship their own
+    # build; "upgrading" it to the distro package can pull in wsjtx-data, which clashes
+    # with a separately installed WSJT-X and leaves apt broken.
+    if have js8call; then
+        APT_PACKAGES="$(echo " $APT_PACKAGES " | sed 's/ js8call / /; s/^ //; s/ $//')"
+        info "JS8Call is already installed - keeping it as it is."
+    fi
     info "Packages: $APT_PACKAGES"
     sudo apt-get update
     # shellcheck disable=SC2086
@@ -137,7 +144,14 @@ if [ "$SKIP_CS_DEPS" = 1 ]; then
     info "Skipped CommStat's own dependency installer (--skip-commstat-deps)."
 elif [ -f "$COMMSTAT_DIR/linuxinstall.sh" ]; then
     info "Running CommStat's own Linux installer (installs Qt WebEngine and Python packages)..."
+    # linuxinstall.sh writes ~/Desktop/CommStat.desktop (relative icon path, launches this
+    # copy without its audio/JS8Call setup) and would replace a shortcut for a CommStat the
+    # user already has. Keep theirs; this copy is started by websdr-js8-start instead.
+    cs_icon="$HOME/Desktop/CommStat.desktop"; cs_icon_bak=""
+    if [ -f "$cs_icon" ]; then cs_icon_bak="$(mktemp)"; cp -p "$cs_icon" "$cs_icon_bak"; fi
     (cd "$COMMSTAT_DIR" && bash linuxinstall.sh)
+    if [ -n "$cs_icon_bak" ]; then mv "$cs_icon_bak" "$cs_icon"
+    else rm -f "$cs_icon"; fi
 else
     warn "CommStat has no linuxinstall.sh here - install its dependencies by hand (see its README)."
 fi
