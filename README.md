@@ -95,6 +95,10 @@ You'll be asked for a callsign (or any short ID if you're only listening, such a
 
 Details and tuning tips: [docs/USAGE.md](docs/USAGE.md).
 
+A printable guide with all of this documentation:
+[docs/WebSDR-Digital-Receive-Only-Guide.pdf](docs/WebSDR-Digital-Receive-Only-Guide.pdf)
+(regenerate it after editing the docs with `python3 docs/build-guide.py`).
+
 ## The prerequisite check
 
 `install.sh` runs `preflight.sh` first. It is **read-only** (no changes, no sudo)
